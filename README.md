@@ -1,3 +1,6 @@
+# Transformers 5 compatible fork
+I updated the import issues that would prevent this custom node from working with transformers versions >5, it should make VibeVoice work on the current (as of July 30th 2026) version of ComfyUI.
+
 # VibeVoice ComfyUI Nodes
 
 A comprehensive ComfyUI integration for Microsoft's VibeVoice text-to-speech model, enabling high-quality single and multi-speaker voice synthesis directly within your ComfyUI workflows.
@@ -407,7 +410,7 @@ You can use two types of pause tags in your text:
 Welcome to our presentation. [pause] Today we'll explore artificial intelligence. [pause:500] Let's begin!
 ```
 
-#### Multi-Speaker  
+#### Multi-Speaker
 ```
 [1]: Hello everyone [pause] how are you doing today?
 [2]: I'm doing great! [pause:500] Thanks for asking.
@@ -427,7 +430,7 @@ This means:
 
 ### How It Works
 1. The wrapper parses your text to find pause tags
-2. Text segments between pauses are processed independently 
+2. Text segments between pauses are processed independently
 3. Silence audio is generated for each pause duration
 4. All audio segments (speech and silence) are concatenated
 

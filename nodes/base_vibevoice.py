@@ -408,7 +408,7 @@ def detect_model_quantization(model_path: str) -> Optional[str]:
 
 class BaseVibeVoiceNode:
     """Base class for VibeVoice nodes containing common functionality"""
-    
+
     def __init__(self):
         self.model = None
         self.processor = None
@@ -421,57 +421,57 @@ class BaseVibeVoiceNode:
         self.use_diffusion_head_lora = True
         self.use_acoustic_connector_lora = True
         self.use_semantic_connector_lora = True
-    
+
     def free_memory(self):
         """Free model and processor from memory"""
         try:
             if self.model is not None:
                 del self.model
                 self.model = None
-            
+
             if self.processor is not None:
                 del self.processor
                 self.processor = None
-            
+
             self.current_model_folder = None
             self.current_quantize_llm = "full precision"
-            
+
             # Force garbage collection and clear CUDA cache if available
             import gc
             gc.collect()
-            
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-            
+
             logger.info("Model and processor memory freed successfully")
-            
+
         except Exception as e:
             logger.error(f"Error freeing memory: {e}")
-    
+
     def _check_dependencies(self):
         """Check if VibeVoice is available and import it with fallback installation"""
         try:
             import sys
             import os
-            
+
             # Add vvembed to path
             current_dir = os.path.dirname(os.path.abspath(__file__))
             parent_dir = os.path.dirname(current_dir)
             vvembed_path = os.path.join(parent_dir, 'vvembed')
-            
+
             if vvembed_path not in sys.path:
                 sys.path.insert(0, vvembed_path)
-            
+
             # Import from embedded version
             from modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
-            
+
             logger.info(f"Using embedded VibeVoice from {vvembed_path}")
             return None, VibeVoiceForConditionalGenerationInference
-            
+
         except ImportError as e:
             logger.error(f"Embedded VibeVoice import failed: {e}")
-            
+
             # Try fallback to installed version if available
             try:
                 import vibevoice
@@ -480,12 +480,12 @@ class BaseVibeVoiceNode:
                 return vibevoice, VibeVoiceForConditionalGenerationInference
             except ImportError:
                 pass
-            
+
             raise Exception(
                 "VibeVoice embedded module import failed. Please ensure the vvembed folder exists "
                 "and transformers>=4.51.3 is installed."
             )
-    
+
     def _apply_lora(self, lora_path: str):
         """Apply LoRA adapters to the model"""
         try:
@@ -742,34 +742,34 @@ class BaseVibeVoiceNode:
         try:
             from sageattention import sageattn
             import torch.nn.functional as F
-            
+
             # Counter for patched layers
             patched_count = 0
-            
+
             def patch_attention_forward(module):
                 """Recursively patch attention layers to use SageAttention"""
                 nonlocal patched_count
-                
+
                 # Check if this module has scaled_dot_product_attention
                 if hasattr(module, 'forward'):
                     original_forward = module.forward
-                    
+
                     # Create wrapper that replaces F.scaled_dot_product_attention with sageattn
                     def sage_forward(*args, **kwargs):
                         # Temporarily replace F.scaled_dot_product_attention
                         original_sdpa = F.scaled_dot_product_attention
-                        
+
                         def sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, **kwargs):
                             """Wrapper that converts sdpa calls to sageattn"""
                             # Log any unexpected parameters for debugging
                             if kwargs:
                                 unexpected_params = list(kwargs.keys())
                                 logger.debug(f"SageAttention: Ignoring unsupported parameters: {unexpected_params}")
-                            
+
                             try:
                                 # SageAttention expects tensors in specific format
                                 # Transformers typically use (batch, heads, seq_len, head_dim)
-                                
+
                                 # Check tensor dimensions to determine layout
                                 if query.dim() == 4:
                                     # 4D tensor: (batch, heads, seq, dim)
@@ -778,24 +778,24 @@ class BaseVibeVoiceNode:
                                     seq_len_q = query.shape[2]
                                     seq_len_k = key.shape[2]
                                     head_dim = query.shape[3]
-                                    
+
                                     # Reshape to (batch*heads, seq, dim) for HND layout
                                     query_reshaped = query.reshape(batch_size * num_heads, seq_len_q, head_dim)
                                     key_reshaped = key.reshape(batch_size * num_heads, seq_len_k, head_dim)
                                     value_reshaped = value.reshape(batch_size * num_heads, seq_len_k, head_dim)
-                                    
+
                                     # Call sageattn with HND layout
                                     output = sageattn(
                                         query_reshaped, key_reshaped, value_reshaped,
                                         is_causal=is_causal,
                                         tensor_layout="HND"  # Heads*batch, seqN, Dim
                                     )
-                                    
+
                                     # Output should be (batch*heads, seq_len_q, head_dim)
                                     # Reshape back to (batch, heads, seq, dim)
                                     if output.dim() == 3:
                                         output = output.reshape(batch_size, num_heads, seq_len_q, head_dim)
-                                    
+
                                     return output
                                 else:
                                     # For 3D tensors, assume they're already in HND format
@@ -805,54 +805,54 @@ class BaseVibeVoiceNode:
                                         tensor_layout="HND"
                                     )
                                     return output
-                                    
+
                             except Exception as e:
                                 # If SageAttention fails, fall back to original implementation
                                 logger.debug(f"SageAttention failed, using original: {e}")
                                 # Call with proper arguments - scale is a keyword argument in PyTorch 2.0+
                                 # Pass through any additional kwargs that the original sdpa might support
                                 if scale is not None:
-                                    return original_sdpa(query, key, value, attn_mask=attn_mask, 
+                                    return original_sdpa(query, key, value, attn_mask=attn_mask,
                                                        dropout_p=dropout_p, is_causal=is_causal, scale=scale, **kwargs)
                                 else:
-                                    return original_sdpa(query, key, value, attn_mask=attn_mask, 
+                                    return original_sdpa(query, key, value, attn_mask=attn_mask,
                                                        dropout_p=dropout_p, is_causal=is_causal, **kwargs)
-                        
+
                         # Replace the function
                         F.scaled_dot_product_attention = sage_sdpa
-                        
+
                         try:
                             # Call original forward with patched attention
                             result = original_forward(*args, **kwargs)
                         finally:
                             # Restore original function
                             F.scaled_dot_product_attention = original_sdpa
-                        
+
                         return result
-                    
+
                     # Check if this module likely uses attention
                     # Look for common attention module names
                     module_name = module.__class__.__name__.lower()
                     if any(name in module_name for name in ['attention', 'attn', 'multihead']):
                         module.forward = sage_forward
                         patched_count += 1
-                
+
                 # Recursively patch child modules
                 for child in module.children():
                     patch_attention_forward(child)
-            
+
             # Apply patching to the entire model
             patch_attention_forward(self.model)
-            
+
             logger.info(f"Patched {patched_count} attention layers with SageAttention")
-            
+
             if patched_count == 0:
                 logger.warning("No attention layers found to patch - SageAttention may not be applied")
-                
+
         except Exception as e:
             logger.error(f"Failed to apply SageAttention: {e}")
             logger.warning("Continuing with standard attention implementation")
-    
+
     def load_model(self, model_name: str, model_folder: str, attention_type: str = "auto", quantize_llm: str = "full precision", lora_path: str = None):
         """Load VibeVoice model with specified attention implementation and optional LoRA
 
@@ -875,31 +875,31 @@ class BaseVibeVoiceNode:
             current_attention != attention_type or
             quantize_changed or
             lora_changed):
-            
+
             # Free existing model before loading new one (important for attention type, quantization, or LoRA changes)
             if self.model is not None and (current_attention != attention_type or quantize_changed or getattr(self, 'current_model_folder', None) != model_folder or lora_changed):
                 logger.info(f"Freeing existing model before loading with new settings (attention: {current_attention} -> {attention_type}, quantize: {current_quantize_llm} -> {quantize_llm}, LoRA: {current_lora} -> {lora_path})")
                 self.free_memory()
-            
+
             try:
                 vibevoice, VibeVoiceInferenceModel = self._check_dependencies()
-                
+
                 # Set ComfyUI models directory
                 import folder_paths
                 models_dir = folder_paths.get_folder_paths("checkpoints")[0]
                 comfyui_models_dir = os.path.join(os.path.dirname(models_dir), "vibevoice")
                 os.makedirs(comfyui_models_dir, exist_ok=True)
-                
+
                 # Import time for timing
                 import time
                 start_time = time.time()
-                
+
                 # Suppress verbose logs
                 import transformers
                 import warnings
                 transformers.logging.set_verbosity_error()
                 warnings.filterwarnings("ignore", category=UserWarning)
-                
+
                 # Get the actual model path using our discovery function
                 model_full_path = os.path.join(comfyui_models_dir, model_folder)
 
@@ -924,12 +924,12 @@ class BaseVibeVoiceNode:
                 quantization = detect_model_quantization(model_files_path)
                 if quantization:
                     logger.info(f"Detected {quantization} quantization")
-                
+
                 # Check if this is a quantized model
                 is_quantized_4bit = quantization == "4bit"
                 is_quantized_8bit = quantization == "8bit"
                 is_quantized = is_quantized_4bit or is_quantized_8bit
-                
+
                 # Prepare attention implementation kwargs
                 model_kwargs = {
                     "cache_dir": comfyui_models_dir,
@@ -937,7 +937,7 @@ class BaseVibeVoiceNode:
                     "torch_dtype": torch.bfloat16,
                     "device_map": get_device_map(),
                 }
-                
+
                 # Handle quantized model loading
                 if is_quantized_4bit or is_quantized_8bit:
                     # Check if CUDA is available (required for quantization)
@@ -1080,7 +1080,7 @@ class BaseVibeVoiceNode:
                 else:
                     # Auto mode - let transformers decide the best implementation
                     logger.info("Using auto attention implementation selection")
-                
+
                 # Load the model from local path only
                 model_kwargs["local_files_only"] = True
 
@@ -1242,9 +1242,9 @@ class BaseVibeVoiceNode:
                                 "Required files: tokenizer_config.json, vocab.json, merges.txt, tokenizer.json\n"
                                 f"Place tokenizer files in: {os.path.join(comfyui_models_dir, 'tokenizer')}/"
                             )
-                    
+
                     logger.info("Attempting to load processor with fallback method...")
-                    
+
                     # Fallback: try loading without subfolder
                     try:
                         if "subfolder" in processor_kwargs:
@@ -1270,7 +1270,7 @@ class BaseVibeVoiceNode:
                             f"Failed to load VibeVoice processor. Error: {fallback_error}\n"
                             f"Please ensure transformers>=4.51.3 is installed."
                         )
-                
+
                 # Move to appropriate device (skip for quantized models as they use device_map)
                 # Skip device movement for both pre-quantized models and LLM-quantized models
                 is_llm_quantized = quantize_llm != "full precision"
@@ -1282,7 +1282,7 @@ class BaseVibeVoiceNode:
                         self.model = self.model.to("mps")
                 else:
                     logger.info("Quantized model already mapped to device via device_map")
-                
+
                 # Apply SageAttention if requested and available
                 if use_sage_attention and SAGE_AVAILABLE:
                     self._apply_sage_attention()
@@ -1296,49 +1296,49 @@ class BaseVibeVoiceNode:
                 self.current_attention_type = attention_type
                 self.current_quantize_llm = quantize_llm
                 self.current_lora_path = lora_path
-                
+
             except Exception as e:
                 logger.error(f"Failed to load VibeVoice model: {str(e)}")
                 raise Exception(f"Model loading failed: {str(e)}")
-    
+
     def _create_synthetic_voice_sample(self, speaker_idx: int) -> np.ndarray:
         """Create synthetic voice sample for a specific speaker"""
         sample_rate = 24000
         duration = 1.0
         samples = int(sample_rate * duration)
-        
+
         t = np.linspace(0, duration, samples, False)
-        
+
         # Create realistic voice-like characteristics for each speaker
         # Use different base frequencies for different speaker types
         base_frequencies = [120, 180, 140, 200]  # Mix of male/female-like frequencies
         base_freq = base_frequencies[speaker_idx % len(base_frequencies)]
-        
+
         # Create vowel-like formants (like "ah" sound) - unique per speaker
         formant1 = 800 + speaker_idx * 100  # First formant
         formant2 = 1200 + speaker_idx * 150  # Second formant
-        
+
         # Generate more voice-like waveform
         voice_sample = (
             # Fundamental with harmonics (voice-like)
             0.6 * np.sin(2 * np.pi * base_freq * t) +
             0.25 * np.sin(2 * np.pi * base_freq * 2 * t) +
             0.15 * np.sin(2 * np.pi * base_freq * 3 * t) +
-            
+
             # Formant resonances (vowel-like characteristics)
             0.1 * np.sin(2 * np.pi * formant1 * t) * np.exp(-t * 2) +
             0.05 * np.sin(2 * np.pi * formant2 * t) * np.exp(-t * 3) +
-            
+
             # Natural breath noise (reduced)
             0.02 * np.random.normal(0, 1, len(t))
         )
-        
+
         # Add natural envelope (like human speech pattern)
         # Quick attack, slower decay with slight vibrato (unique per speaker)
         vibrato_freq = 4 + speaker_idx * 0.3  # Slightly different vibrato per speaker
         envelope = (np.exp(-t * 0.3) * (1 + 0.1 * np.sin(2 * np.pi * vibrato_freq * t)))
         voice_sample *= envelope * 0.08  # Lower volume
-        
+
         return voice_sample.astype(np.float32)
 
     def _adjust_voice_speed(self, audio_np: np.ndarray, speed_factor: float, sample_rate: int = 24000) -> np.ndarray:
@@ -1375,32 +1375,32 @@ class BaseVibeVoiceNode:
         """Prepare audio from ComfyUI format to numpy array"""
         if voice_audio is None:
             return None
-            
+
         # Extract waveform from ComfyUI audio format
         if isinstance(voice_audio, dict) and "waveform" in voice_audio:
             waveform = voice_audio["waveform"]
             input_sample_rate = voice_audio.get("sample_rate", target_sample_rate)
-            
+
             # Convert to numpy (handling BFloat16 tensors)
             if isinstance(waveform, torch.Tensor):
                 # Convert to float32 first as numpy doesn't support BFloat16
                 audio_np = waveform.cpu().float().numpy()
             else:
                 audio_np = np.array(waveform)
-            
+
             # Handle different audio shapes
             if audio_np.ndim == 3:  # (batch, channels, samples)
                 audio_np = audio_np[0, 0, :]  # Take first batch, first channel
             elif audio_np.ndim == 2:  # (channels, samples)
                 audio_np = audio_np[0, :]  # Take first channel
             # If 1D, leave as is
-            
+
             # Resample if needed
             if input_sample_rate != target_sample_rate:
                 target_length = int(len(audio_np) * target_sample_rate / input_sample_rate)
-                audio_np = np.interp(np.linspace(0, len(audio_np), target_length), 
+                audio_np = np.interp(np.linspace(0, len(audio_np), target_length),
                                    np.arange(len(audio_np)), audio_np)
-            
+
             # Ensure audio is in correct range [-1, 1]
             audio_max = np.abs(audio_np).max()
             if audio_max > 0:
@@ -1416,44 +1416,44 @@ class BaseVibeVoiceNode:
                     logger.info(f"Applied voice speed adjustment: {speed_percent}% slower")
 
             return audio_np.astype(np.float32)
-        
+
         return None
-    
+
     def _split_text_into_chunks(self, text: str, max_words: int = 250) -> List[str]:
         """Split long text into manageable chunks at sentence boundaries
-        
+
         Args:
             text: The text to split
             max_words: Maximum words per chunk (default 250 for safety)
-        
+
         Returns:
             List of text chunks
         """
         import re
-        
+
         # Split into sentences (handling common abbreviations)
         # This regex tries to split on sentence endings while avoiding common abbreviations
         sentence_pattern = r'(?<=[.!?])\s+(?=[A-Z])'
         sentences = re.split(sentence_pattern, text)
-        
+
         # If regex split didn't work well, fall back to simple split
         if len(sentences) == 1 and len(text.split()) > max_words:
             # Fall back to splitting on any period followed by space
             sentences = text.replace('. ', '.|').split('|')
             sentences = [s.strip() for s in sentences if s.strip()]
-        
+
         chunks = []
         current_chunk = []
         current_word_count = 0
-        
+
         for sentence in sentences:
             sentence = sentence.strip()
             if not sentence:
                 continue
-                
+
             sentence_words = sentence.split()
             sentence_word_count = len(sentence_words)
-            
+
             # If single sentence is too long, split it further
             if sentence_word_count > max_words:
                 # Split long sentence at commas or semicolons
@@ -1464,7 +1464,7 @@ class BaseVibeVoiceNode:
                         continue
                     part_words = part.split()
                     part_word_count = len(part_words)
-                    
+
                     if current_word_count + part_word_count > max_words and current_chunk:
                         # Save current chunk
                         chunks.append(' '.join(current_chunk))
@@ -1484,35 +1484,35 @@ class BaseVibeVoiceNode:
                     # Add sentence to current chunk
                     current_chunk.append(sentence)
                     current_word_count += sentence_word_count
-        
+
         # Add remaining chunk
         if current_chunk:
             chunks.append(' '.join(current_chunk))
-        
+
         # If no chunks were created, return the original text
         if not chunks:
             chunks = [text]
-        
+
         logger.info(f"Split text into {len(chunks)} chunks (max {max_words} words each)")
         for i, chunk in enumerate(chunks):
             word_count = len(chunk.split())
             logger.debug(f"Chunk {i+1}: {word_count} words")
-        
+
         return chunks
-    
+
     def _parse_pause_keywords(self, text: str) -> List[Tuple[str, Any]]:
         """Parse [pause] and [pause:ms] keywords from text
-        
+
         Args:
             text: Text potentially containing pause keywords
-            
+
         Returns:
             List of tuples: ('text', str) or ('pause', duration_ms)
         """
         segments = []
         # Pattern matches [pause] or [pause:1500] where 1500 is milliseconds
         pattern = r'\[pause(?::(\d+))?\]'
-        
+
         last_end = 0
         for match in re.finditer(pattern, text):
             # Add text segment before pause (if any)
@@ -1520,48 +1520,48 @@ class BaseVibeVoiceNode:
                 text_segment = text[last_end:match.start()].strip()
                 if text_segment:  # Only add non-empty text segments
                     segments.append(('text', text_segment))
-            
+
             # Add pause segment with duration (default 1000ms = 1 second)
             duration_ms = int(match.group(1)) if match.group(1) else 1000
             segments.append(('pause', duration_ms))
             last_end = match.end()
-        
+
         # Add remaining text after last pause (if any)
         if last_end < len(text):
             remaining_text = text[last_end:].strip()
             if remaining_text:
                 segments.append(('text', remaining_text))
-        
+
         # If no pauses found, return original text as single segment
         if not segments:
             segments.append(('text', text))
-        
+
         logger.debug(f"Parsed text into {len(segments)} segments (including pauses)")
         return segments
-    
+
     def _generate_silence(self, duration_ms: int, sample_rate: int = 24000) -> dict:
         """Generate silence audio tensor for specified duration
-        
+
         Args:
             duration_ms: Duration of silence in milliseconds
             sample_rate: Sample rate (default 24000 Hz for VibeVoice)
-            
+
         Returns:
             Audio dict with silence waveform
         """
         # Calculate number of samples for the duration
         num_samples = int(sample_rate * duration_ms / 1000.0)
-        
+
         # Create silence tensor with shape (1, 1, num_samples) to match audio format
         silence_waveform = torch.zeros(1, 1, num_samples, dtype=torch.float32)
-        
+
         logger.info(f"Generated {duration_ms}ms silence ({num_samples} samples)")
-        
+
         return {
             "waveform": silence_waveform,
             "sample_rate": sample_rate
         }
-    
+
     def _format_text_for_vibevoice(self, text: str, speakers: list) -> str:
         """Format text with speaker information for VibeVoice using correct format"""
         # Remove any newlines from the text to prevent parsing issues
@@ -1569,7 +1569,7 @@ class BaseVibeVoiceNode:
         text = text.replace('\n', ' ').replace('\r', ' ')
         # Clean up multiple spaces
         text = ' '.join(text.split())
-        
+
         # VibeVoice expects format: "Speaker 1: text" not "Name: text"
         if len(speakers) == 1:
             return f"Speaker 1: {text}"
@@ -1586,7 +1586,7 @@ class BaseVibeVoiceNode:
             else:
                 # Plain text, assign to first speaker
                 return f"Speaker 1: {text}"
-    
+
     def _generate_with_vibevoice(self, formatted_text: str, voice_samples: List[np.ndarray],
                                 cfg_scale: float, seed: int, diffusion_steps: int, use_sampling: bool,
                                 temperature: float = 0.95, top_p: float = 0.95, llm_lora_strength: float = 1.0) -> dict:
@@ -1595,35 +1595,35 @@ class BaseVibeVoiceNode:
             # Ensure model and processor are loaded
             if self.model is None or self.processor is None:
                 raise Exception("Model or processor not loaded")
-            
+
             # Set seeds for reproducibility
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed(seed)
                 torch.cuda.manual_seed_all(seed)  # For multi-GPU
-            
+
             # Also set numpy seed for any numpy operations
             np.random.seed(seed)
-            
+
             # Set diffusion steps
             self.model.set_ddpm_inference_steps(diffusion_steps)
             logger.info(f"Starting audio generation with {diffusion_steps} diffusion steps...")
-            
+
             # Check for interruption before starting generation
             if INTERRUPTION_SUPPORT:
                 try:
                     import comfy.model_management as mm
-                    
+
                     # Check if we're being interrupted right now
                     # The interrupt flag is reset by ComfyUI before each node execution
                     # So we only check model_management's throw_exception_if_processing_interrupted
                     # which is the proper way to check for interruption
                     mm.throw_exception_if_processing_interrupted()
-                    
+
                 except ImportError:
                     # If comfy.model_management is not available, skip this check
                     pass
-            
+
             # Prepare inputs using processor
             inputs = self.processor(
                 [formatted_text],  # Wrap text in list
@@ -1631,20 +1631,20 @@ class BaseVibeVoiceNode:
                 return_tensors="pt",
                 return_attention_mask=True
             )
-            
+
             # Move to device
             device = next(self.model.parameters()).device
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-            
+
             # Estimate tokens for user information (not used as limit)
             text_length = len(formatted_text.split())
             estimated_tokens = int(text_length * 2.5)  # More accurate estimate for display
-            
+
             # Log generation start with explanation
             logger.info(f"Generating audio with {diffusion_steps} diffusion steps...")
             logger.info(f"Note: Progress bar shows max possible tokens, not actual needed (~{estimated_tokens} estimated)")
             logger.info("The generation will stop automatically when audio is complete")
-            
+
             # Create stop check function for interruption support
             stop_check_fn = None
             if INTERRUPTION_SUPPORT:
@@ -1659,9 +1659,9 @@ class BaseVibeVoiceNode:
                     except:
                         pass
                     return False
-                
+
                 stop_check_fn = check_comfyui_interrupt
-            
+
             # Generate with official parameters
             with torch.no_grad():
                 if use_sampling:
@@ -1686,43 +1686,47 @@ class BaseVibeVoiceNode:
                         do_sample=False,  # More deterministic generation
                         stop_check_fn=stop_check_fn,
                     )
-                
+
                 # Check if we got actual audio output
                 if hasattr(output, 'speech_outputs') and output.speech_outputs:
                     speech_tensors = output.speech_outputs
 
                     if isinstance(speech_tensors, list) and len(speech_tensors) > 0:
-                        audio_tensor = torch.cat(speech_tensors, dim=-1)
+                        valid_speech_tensors = [t for t in speech_tensors if isinstance(t, torch.Tensor)]
+                        if not valid_speech_tensors:
+                            logger.error("VibeVoice returned no valid audio tensors in speech_outputs")
+                            raise Exception("VibeVoice generated no valid audio. Try without voice clone sample or reduce CFG/diffusion steps.")
+                        audio_tensor = torch.cat(valid_speech_tensors, dim=-1)
                     else:
                         audio_tensor = speech_tensors
-                    
+
                     # Ensure proper format (1, 1, samples)
                     if audio_tensor.dim() == 1:
                         audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)
                     elif audio_tensor.dim() == 2:
                         audio_tensor = audio_tensor.unsqueeze(0)
-                    
+
                     # Convert to float32 for compatibility with downstream nodes (Save Audio, etc.)
                     # Many audio processing nodes don't support BFloat16
                     return {
                         "waveform": audio_tensor.cpu().float(),
                         "sample_rate": 24000
                     }
-                    
+
                 elif hasattr(output, 'sequences'):
                     logger.error("VibeVoice returned only text tokens, no audio generated")
                     raise Exception("VibeVoice failed to generate audio - only text tokens returned")
-                    
+
                 else:
                     logger.error(f"Unexpected output format from VibeVoice: {type(output)}")
                     raise Exception(f"VibeVoice returned unexpected output format: {type(output)}")
-                
+
         except Exception as e:
             # Re-raise interruption exceptions without wrapping
             import comfy.model_management as mm
             if isinstance(e, mm.InterruptProcessingException):
                 raise  # Let the interruption propagate
-            
+
             # For real errors, log and re-raise with context
             logger.error(f"VibeVoice generation failed: {e}")
             raise Exception(f"VibeVoice generation failed: {str(e)}")

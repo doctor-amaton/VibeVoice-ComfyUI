@@ -25,6 +25,21 @@ from diffusers.utils import deprecate
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.schedulers.scheduling_utils import KarrasDiffusionSchedulers, SchedulerMixin, SchedulerOutput
 
+
+def _safe_move_to_cpu(tensor: torch.Tensor) -> torch.Tensor:
+    """Move tensor to CPU unless it is meta or a meta-copy error is raised."""
+    if getattr(tensor, "is_meta", False):
+        return tensor
+
+    try:
+        return tensor.to("cpu")
+    except NotImplementedError as exc:
+        # Under some transformers v5 init paths, device wrappers may still
+        # surface this message even when `is_meta` is False.
+        if "meta tensor" in str(exc).lower():
+            return tensor
+        raise
+
 def betas_for_alpha_bar(
     num_diffusion_timesteps,
     max_beta=0.999,
@@ -292,7 +307,60 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         self.lower_order_nums = 0
         self._step_index = None
         self._begin_index = None
-        self.sigmas = self.sigmas.to("cpu")  # to avoid too much CPU/GPU communication
+        self.sigmas = _safe_move_to_cpu(self.sigmas)  # avoid too much CPU/GPU communication
+
+    def _rebuild_schedule_tensors_if_meta(self):
+        """Rebuild scheduler tensors on CPU when they were initialized on meta device."""
+        tensors = [
+            getattr(self, "betas", None),
+            getattr(self, "alphas", None),
+            getattr(self, "alphas_cumprod", None),
+            getattr(self, "lambda_t", None),
+            getattr(self, "sigmas", None),
+        ]
+        if not any(getattr(t, "is_meta", False) for t in tensors if isinstance(t, torch.Tensor)):
+            return
+
+        num_train_timesteps = self.config.num_train_timesteps
+        beta_schedule = self.config.beta_schedule
+
+        if self.config.trained_betas is not None:
+            betas = torch.tensor(self.config.trained_betas, dtype=torch.float32)
+        elif beta_schedule == "linear":
+            betas = torch.linspace(self.config.beta_start, self.config.beta_end, num_train_timesteps, dtype=torch.float32)
+        elif beta_schedule == "scaled_linear":
+            betas = torch.linspace(
+                self.config.beta_start**0.5,
+                self.config.beta_end**0.5,
+                num_train_timesteps,
+                dtype=torch.float32,
+            ) ** 2
+        elif beta_schedule == "squaredcos_cap_v2" or beta_schedule == "cosine":
+            betas = betas_for_alpha_bar(num_train_timesteps, alpha_transform_type="cosine")
+        elif beta_schedule == "cauchy":
+            betas = betas_for_alpha_bar(num_train_timesteps, alpha_transform_type="cauchy")
+        elif beta_schedule == "laplace":
+            betas = betas_for_alpha_bar(num_train_timesteps, alpha_transform_type="laplace")
+        else:
+            raise NotImplementedError(f"{beta_schedule} is not implemented for {self.__class__}")
+
+        if self.config.rescale_betas_zero_snr:
+            betas = rescale_zero_terminal_snr(betas)
+
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+        if self.config.rescale_betas_zero_snr:
+            alphas_cumprod[-1] = 2**-24
+
+        self.betas = betas
+        self.alphas = alphas
+        self.alphas_cumprod = alphas_cumprod
+        self.alpha_t = torch.sqrt(self.alphas_cumprod)
+        self.sigma_t = torch.sqrt(1 - self.alphas_cumprod)
+        self.lambda_t = torch.log(self.alpha_t) - torch.log(self.sigma_t)
+        self.sigmas = ((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5
+        self.sigmas = _safe_move_to_cpu(self.sigmas)
 
     @property
     def step_index(self):
@@ -346,13 +414,22 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         if timesteps is not None and self.config.use_lu_lambdas:
             raise ValueError("Cannot use `timesteps` with `config.use_lu_lambdas = True`")
 
+        # Transformers v5 can initialize this scheduler with meta tensors.
+        # Ensure tensors are concrete before scalar extraction / numpy conversion.
+        self._rebuild_schedule_tensors_if_meta()
+
         if timesteps is not None:
             timesteps = np.array(timesteps).astype(np.int64)
         else:
             # Clipping the minimum of all lambda(t) for numerical stability.
             # This is critical for cosine (squaredcos_cap_v2) noise schedule.
             clipped_idx = torch.searchsorted(torch.flip(self.lambda_t, [0]), self.config.lambda_min_clipped)
-            last_timestep = ((self.config.num_train_timesteps - clipped_idx).numpy()).item()
+            if isinstance(clipped_idx, torch.Tensor):
+                clipped_idx = _safe_move_to_cpu(clipped_idx)
+                clipped_idx_val = int(clipped_idx.item())
+            else:
+                clipped_idx_val = int(clipped_idx)
+            last_timestep = int(self.config.num_train_timesteps - clipped_idx_val)
 
             # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
             if self.config.timestep_spacing == "linspace":
@@ -420,7 +497,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         # add an index counter for schedulers that allow duplicated timesteps
         self._step_index = None
         self._begin_index = None
-        self.sigmas = self.sigmas.to("cpu")  # to avoid too much CPU/GPU communication
+        self.sigmas = _safe_move_to_cpu(self.sigmas)  # avoid too much CPU/GPU communication
 
     # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler._threshold_sample
     def _threshold_sample(self, sample: torch.Tensor) -> torch.Tensor:
@@ -1042,7 +1119,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             sigma_t = sigma_t.unsqueeze(-1)
         noisy_samples = alpha_t * original_samples + sigma_t * noise
         return noisy_samples
-    
+
     def get_velocity(self, original_samples: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
         # alpha_t = self.alpha_t.to(device=original_samples.device, dtype=original_samples.dtype)
         # sigma_t = self.sigma_t.to(device=original_samples.device, dtype=original_samples.dtype)
